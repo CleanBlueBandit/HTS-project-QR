@@ -1,1 +1,8 @@
-{}
+{
+  "George": {
+    "lastname": "Tavadze",
+    "companies": [
+      "apple"
+    ]
+  }
+}

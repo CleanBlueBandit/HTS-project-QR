@@ -27,7 +27,7 @@ const requireAdmin = (req, res, next) => {
 };
 
 // Constants
-const IP = "192.168.1.19";
+const IP = "192.168.10.158";
 const PORT = 6767;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -202,6 +202,7 @@ app.get('/dashboard', requireAdmin, async (req, res) => {
                     
                     <div class="qr-container">
                         <img id="qr" src="${defaultQrCode}" alt="QR Code" />
+                        <a href="${defaultQrCode}" download>Download QR</a>
                         <div class="input-group">
                             <input type="text" placeholder="" id="url">
                             <button class="btn-generate" onclick="generateNewQR()">Create</button>
