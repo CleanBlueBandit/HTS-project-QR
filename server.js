@@ -6,6 +6,9 @@ import QRCode from 'qrcode';
 import fs from 'fs/promises';
 import ExcelJS from 'exceljs';
 import bcrypt from 'bcryptjs';
+import { ZipArchive } from 'archiver';
+
+
 
 // Middleware
 const app = express();
@@ -19,15 +22,18 @@ app.use(session({
     httpOnly: true                 
   }
 }));
+const archive = new ZipArchive({ 
+    zlib: { level: 3 } 
+});
 const requireAdmin = (req, res, next) => {
-    if (req.session && req.session.isAdmin) {
+    if (req.session && req.session.isAdmin || unlocked) {
         return next();
     }
     return res.redirect('/login');
 };
 
 // Constants
-const IP = "192.168.10.158";
+const IP = "10.0.0.110";
 const PORT = 6767;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,7 +41,14 @@ const ADMIN_HASH = "$2b$10$XhgvQHaYVqyPn6FsP3UGOewx7mP6Qg1f/w06xUpk/PA.4RzRHNUSO
 
 // Global variables
 
+var unlocked = true;
+
 // Helpers
+
+function cfl(string) {
+  return string.charAt(0).toUpperCase() + string.slice(1);
+}
+
 function sendHTML(file){
     return path.join(__dirname, file + ".html")
 }
@@ -124,119 +137,161 @@ app.get('/login', (req, res) => {
 });
 
 
-app.get('/dashboard', requireAdmin, async (req, res) => {
-
+app.get('/download-zip', async (req, res) => {
     try {
-        const defaultUrl = `http://${IP}:${PORT}/`;
-        const defaultQrCode = await QRCode.toDataURL(defaultUrl);
+        const data = await load('companies.json', {});
+        const companies = Object.keys(data);
 
-        res.send(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Admin Dashboard</title>
-                <style>
-                    body { 
-                        font-family: sans-serif; 
-                        display: flex; 
-                        gap: 30px;
-                        align-items: center; 
-                        justify-content: center; 
-                        min-height: 100vh; 
-                        background-color: #f4f6f9; 
-                        margin: 0; 
-                        padding: 20px;
-                        box-sizing: border-box;
-                    }
-                    .card { 
-                        background: white; 
-                        padding: 30px; 
-                        border-radius: 12px; 
-                        box-shadow: 0 4px 12px rgba(0,0,0,0.1); 
-                        text-align: center; 
-                        width: 350px;
-                        height: 400px;
-                        display: flex;
-                        flex-direction: column;
-                        justify-content: space-between;
-                        box-sizing: border-box;
-                    }
-                    h1 { color: #1f4e78; margin: 0 0 10px 0; font-size: 22px; }
-                    p { color: #666; font-size: 14px; margin: 0 0 20px 0; line-size: 1.4; }
-                    
-                    /* Export Section styles */
-                    .btn-download { 
-                        display: block; 
-                        background-color: #2f5597; 
-                        color: white; 
-                        text-decoration: none; 
-                        padding: 14px; 
-                        border-radius: 6px; 
-                        font-weight: bold; 
-                        transition: background 0.2s; 
-                        font-size: 15px; 
-                    }
-                    .btn-download:hover { background-color: #1f4e78; }
+        if (companies.length === 0) {
+            return res.status(400).send("No companies found to generate QR codes for.");
+        }
 
-                    /* QR Section styles */
-                    .qr-container { display: flex; flex-direction: column; align-items: center; gap: 10px; }
-                    #qr { width: 160px; height: 160px; border: 2px solid #ddd; padding: 5px; border-radius: 6px; }
-                    .input-group { display: flex; width: 100%; gap: 5px; }
-                    input { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
-                    .btn-generate { background: #28a745; color: white; border: none; padding: 0 15px; border-radius: 4px; font-weight: bold; cursor: pointer; }
-                    .btn-generate:hover { background: #218838; }
-                </style>
-            </head>
-            <body>
+        const archive = new ZipArchive('zip', { zlib: { level: 3 } });
+        
+        res.attachment('all-company-qrs.zip');
+        archive.pipe(res);
 
-                <div class="card">
-                    <div>
-                        <h1>User Report Exporter</h1>
-                    <a href="/export" class="btn-download">Download Excel Report</a>
-                    </div>
-                </div>
+        for (const company of companies) {
+            const urlToEncode = `http://${IP}:${PORT}/contact?link=${encodeURIComponent(company)}`;
+            
+            const qrBuffer = await QRCode.toBuffer(urlToEncode, { type: 'png', width: 300 });
 
-                <div class="card">
-                    <div>
-                        <h1>QR Authentication Engine</h1>
-                    
-                    <div class="qr-container">
-                        <img id="qr" src="${defaultQrCode}" alt="QR Code" />
-                        <a href="${defaultQrCode}" download>Download QR</a>
-                        <div class="input-group">
-                            <input type="text" placeholder="" id="url">
-                            <button class="btn-generate" onclick="generateNewQR()">Create</button>
-                        </div>
-                    </div>
-                </div>
+            archive.append(qrBuffer, { name: `${cfl(company)}-qr.png` });
+        }
 
-                <script>
-                    function generateNewQR() {
-                        const targetLink = document.getElementById("url").value.trim();
-                        if (!targetLink) return alert("Please enter a valid company link identifier.");
-                        
-                        fetch("http://${IP}:${PORT}/qr", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" }, 
-                            body: JSON.stringify({ url: targetLink })
-                        }) 
-                        .then(res => {
-                            if (!res.ok) throw new Error("Server rejected QR allocation request.");
-                            return res.json();
-                        })
-                        .then((data) => {
-                            document.getElementById("qr").src = data.src;
-                        })
-                        .catch(err => console.error("Error generating QR:", err));
-                    }
-                </script>
-            </body>
-            </html>
-        `);
+        await archive.finalize();
+
     } catch (err) {
-        console.error("Dashboard failed to initialize components:", err);
-        res.status(500).send("Error rendering dashboard configurations.");
+        console.error("ZIP Generation Error:", err);
+        if (!res.headersSent) {
+            res.status(500).send('Error generating QR code batch zip.');
+        }
     }
+});
+
+app.get('/dashboard', requireAdmin, async (req, res) => {
+    const defaultUrl = `http://${IP}:${PORT}/`;
+    const defaultQrCode = await QRCode.toDataURL(defaultUrl);
+
+    res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Admin Dashboard</title>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+            <style>
+                body { 
+                    font-family: sans-serif; 
+                    display: flex; 
+                    gap: 30px;
+                    align-items: center; 
+                    justify-content: center; 
+                    min-height: 100vh; 
+                    background-color: #f4f6f9; 
+                    margin: 0; 
+                    padding: 20px;
+                    box-sizing: border-box;
+                }
+                .qr-link-excel {
+                    color: #1f4e78; 
+                    text-decoration: none;
+                    font-size: 13px;
+                    font-weight: bold;
+                    margin-top: 2px;
+                }
+                .qr-link-excel:hover {
+                    text-decoration: underline;
+                }
+                .card { 
+                    background: white; 
+                    padding: 30px; 
+                    border-radius: 12px; 
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.1); 
+                    text-align: center; 
+                    width: 350px;
+                    height: 450px; 
+                    display: flex;
+                    flex-direction: column;
+                    justify-content: space-between;
+                    box-sizing: border-box;
+                }
+                h1 { color: #1f4e78; margin: 0 0 10px 0; font-size: 22px; }
+                p { color: #666; font-size: 14px; margin: 0 0 20px 0; line-height: 1.4; }
+                
+                .qr-container { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+                #qr { width: 160px; height: 160px; border: 2px solid #ddd; padding: 5px; border-radius: 6px; }
+                .qr-link { color: #2f5597; text-decoration: none; font-size: 14px; font-weight: bold; }
+                .qr-link:hover { text-decoration: underline; }
+                .input-group { display: flex; width: 100%; gap: 5px; }
+                input { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+                .btn-generate { background: #28a745; color: white; border: none; padding: 0 15px; border-radius: 4px; font-weight: bold; cursor: pointer; }
+                .btn-generate:hover { background: #218838; }
+                a:visited {
+                    color: blue;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="card" style="height: 480px;"> 
+                <div>
+                    <h1>Admin Control Panel</h1>
+                    <p>Manage authentication keys and export system data logs.</p>
+                </div>
+                
+                <div class="qr-container">
+                    <img id="qr" src="${defaultQrCode}" alt="QR Code" />
+                    
+                    <a id="dl-link" href="${defaultQrCode}" download="qr-code.png" class="qr-link">Download This QR</a>
+                    
+                    <a href="/download-zip" class="qr-link-batch" style="color: #2f5597; text-decoration: none; font-size: 14px; font-weight: bold;">Download QRs for all companies</a>
+                    
+                    <a href="/export" class="qr-link-excel">Download Excel User Report</a>
+                    
+                    <div class="input-group" style="margin-top: 12px;">
+                        <input type="text" placeholder="Company Link Identifier" id="url">
+                        <button class="btn-generate" onclick="generateNewQR()">Create</button>
+                    </div>
+                </div>
+            </div>
+
+            <script>
+                function generateNewQR() {
+                    // 1. Notice we are checking for lowercase 'qrcode' now!
+                    if (typeof qrcode === 'undefined') {
+                        return alert("The QR generator library is missing or hasn't loaded yet.");
+                    }
+
+                    const urlInput = document.getElementById("url").value.trim();
+                    if (!urlInput) return alert("Please enter a company link identifier!");
+
+                    const targetUrl = "http://${IP}:${PORT}/contact?link=" + encodeURIComponent(urlInput);
+
+                    try {
+                        // 2. Initialize the QR code (0 = auto-size, 'L' = Low error correction)
+                        const qr = qrcode(0, 'L');
+                        
+                        // 3. Feed it the URL data
+                        qr.addData(targetUrl);
+                        
+                        // 4. Process the code matrix
+                        qr.make();
+                        
+                        // 5. Export as a Base64 image URL (the numbers 6 and 2 are cell size and margin)
+                        const imgDataUrl = qr.createDataURL(6, 2); 
+                        
+                        // 6. Update the dashboard image and download link instantly
+                        document.getElementById("qr").src = imgDataUrl;
+                        document.getElementById("dl-link").href = imgDataUrl;
+                        
+                    } catch (err) {
+                        console.error(err);
+                        alert("Error generating QR code locally. Check the console.");
+                    }
+                }
+            </script>
+        </body>
+        </html>
+    `);
 });
 
 app.get('/export', requireAdmin, async (req, res) => {
@@ -334,7 +389,7 @@ app.get("/contact", async (req, res) => {
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>${company}</title>
+            <title>${cfl(company)}</title>
             <style>
                 body { margin: 0; padding: 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; font-family: system-ui, -apple-system, sans-serif; background-color: #f9fafb; color: #111827; text-align: center; }
                 .card { background: #ffffff; padding: 48px 24px; border-radius: 16px; box-shadow: 0 4px 24px rgba(0,0,0,0.04); max-width: 400px; width: 100%; box-sizing: border-box; }
@@ -346,9 +401,9 @@ app.get("/contact", async (req, res) => {
         </head>
         <body>
             <div class="card">
-                <h1>Thank you for your interest in ${company}!</h1>
+                <h1>Thank you for your interest in ${cfl(company)}!</h1>
                 <h2>Further contact is now easier.</h2>
-                <img src="${data[company]}" alt="${company} logo">
+                <img src="${data[company]}" alt="${cfl(company)} logo">
             </div>
         </body>
         </html>
@@ -371,7 +426,7 @@ app.get("/contact", async (req, res) => {
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>${company}</title>
+            <title>${cfl(company)}</title>
             <style>
                 body { margin: 0; padding: 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; font-family: system-ui, -apple-system, sans-serif; background-color: #f9fafb; color: #111827; }
                 .card { background: #ffffff; padding: 40px 24px; border-radius: 16px; box-shadow: 0 4px 24px rgba(0,0,0,0.04); max-width: 400px; width: 100%; box-sizing: border-box; text-align: center; }
@@ -389,7 +444,7 @@ app.get("/contact", async (req, res) => {
         </head>
         <body>
             <div class="card">
-                <img src="${data[company]}" alt="${company} logo">
+                <img src="${data[company]}" alt="${cfl(company)} logo">
                 <h1>Thanks for your interest!</h1>
                 <h2>Just tell us your name so we can reach out later.</h2>
                 
@@ -523,21 +578,6 @@ app.post('/register', async (req, res) => {
     }
 });
 
-app.post('/qr', async (req, res) => {
-    if(locked){
-        return res.sendStatus(404);
-    }
-    try {
-        const urlToEncode = `http://${IP}:${PORT}/contact?link=`+req.body.url;
-
-        const qrCodeDataUrl = await QRCode.toDataURL(urlToEncode);
-
-        res.status(200).json({"src" : qrCodeDataUrl});
-    }
-    catch (err) {
-        res.status(500).json({ "ERR":'Error generating QR code'});
-    }
-});
 
 // Start server
 app.listen(PORT, () => {

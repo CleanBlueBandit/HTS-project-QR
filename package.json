@@ -12,6 +12,7 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "archiver": "^8.0.0",
     "bcryptjs": "^3.0.3",
     "exceljs": "^3.4.0",
     "express": "^5.2.1",

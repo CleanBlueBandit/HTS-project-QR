@@ -2,6 +2,16 @@
   "George": {
     "lastname": "Tavadze",
     "companies": [
+      "Google",
+      "google",
+      "apple",
+      "cloudflare"
+    ]
+  },
+  "John": {
+    "lastname": "Doe",
+    "companies": [
+      "Apple",
       "apple"
     ]
   }
