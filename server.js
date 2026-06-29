@@ -382,12 +382,14 @@ app.get('/export', requireAdmin, async (req, res) => {
 app.get("/contact", async (req, res) => {
   const company = req.query.link;
   const data = await load("companies.json");
-  const safeCompany = escapeHtml(company);
-  const logoUrl = data[company];
-  if (!data[company]) return res.sendStatus(400);
-
   console.log('Companies data:', data);
   console.log('Requested company:', company);
+  if (!data[company]) return res.sendStatus(400);
+
+  const safeCompany = escapeHtml(company);
+  const logoUrl = data[company];
+
+ 
 
   
 
