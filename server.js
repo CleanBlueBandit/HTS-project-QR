@@ -29,7 +29,7 @@ app.use(session({
   resave: false,
   saveUninitialized: true,
   cookie: {
-    secure: false,                         // set true on HTTPS
+    secure: true,                         // set true on HTTPS
     httpOnly: true,
     sameSite: 'strict'
   }
@@ -58,7 +58,7 @@ const publicPath = path.join(__dirname, 'public');
 const ADMIN_HASH = process.env.ADMIN_PASSWORD_HASH || '$2b$10$XhgvQHaYVqyPn6FsP3UGOewx7mP6Qg1f/w06xUpk/PA.4RzRHNUSO';
 
 // Build base URL from environment or fallback to a hardcoded value
-const BASE_URL = process.env.BASE_URL || 'http://10.0.0.110:6767';
+const BASE_URL = process.env.BASE_URL || 'http://https://hts-project-qr.vercel.app';
 
 app.use(express.static(publicPath));
 
