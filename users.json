@@ -1,30 +1,10 @@
 {
-  "John": {
-    "lastname": "Doe",
-    "company": "HTS",
-    "companies": [
-      "google",
-      "paloalto",
-      "microsoft"
-    ]
-  },
-  "Jane": {
-    "lastname": "Doe",
-    "company": "Mari's Sacxobi, LTD.",
-    "companies": [
-      "microsoft",
-      "google",
-      "paloalto",
-      "fortinet"
-    ]
-  },
-  "Arthur": {
-    "lastname": "Morgan",
+  "52ee2cf4-553e-4ef6-a490-97fdf9fc422e": {
+    "first": "John",
+    "last": "Doe",
     "company": "Wildwest, Corp.",
     "companies": [
-      "fortinet",
-      "thales",
-      "akamai"
+      "google"
     ]
   }
 }
