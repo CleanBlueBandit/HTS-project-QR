@@ -1,4 +1,4 @@
-import 'dotenv/config';                               // Load .env (FIX 8)
+import 'dotenv/config';
 import express from 'express';
 import session from 'express-session';
 import path from 'path';
@@ -7,17 +7,17 @@ import QRCode from 'qrcode';
 import fs from 'fs/promises';
 import ExcelJS from 'exceljs';
 import bcrypt from 'bcryptjs';
-import { ZipArchive } from 'archiver';
 import crypto from 'crypto';
 import { csrfSync } from 'csrf-sync';
-import rateLimit from 'express-rate-limit';          // FIX 9
+import rateLimit from 'express-rate-limit';
+import { sql } from '@vercel/postgres';  // ✅ Vercel Postgres client
 
 const app = express();
 
-// --- Trust proxy for correct IP (FIX 2) ---
-app.set('trust proxy', 1);                           // Enable if behind a reverse proxy
+// --- Trust proxy (Vercel) ---
+app.set('trust proxy', 1);
 
-// --- CSRF Protection Setup ---
+// --- CSRF ---
 const { csrfSynchronisedProtection, generateToken } = csrfSync({
   getTokenFromRequest: (req) => req.body._csrf || req.headers['x-csrf-token'],
 });
@@ -25,27 +25,27 @@ const { csrfSynchronisedProtection, generateToken } = csrfSync({
 // --- Middleware ---
 app.use(express.json());
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'fallback-dev-secret', // FIX 8
+  secret: process.env.SESSION_SECRET || 'fallback-dev-secret',
   resave: false,
   saveUninitialized: true,
   cookie: {
-    secure: true,                         // set true on HTTPS
+    secure: true,          // HTTPS only
     httpOnly: true,
     sameSite: 'strict'
   }
 }));
 
-// --- Rate Limiting (FIX 9) ---
+// --- Rate limiting ---
 const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,                // 15 minutes
-  max: 200,                                // limit each IP to 200 requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: 200,
   message: { success: false, error: 'Too many requests, please try again later.' }
 });
 app.use(globalLimiter);
 
 const strictRegisterLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10,                                 // stricter limit for registration
+  max: 10,
   message: { success: false, error: 'Too many registration attempts, please try again later.' }
 });
 
@@ -54,41 +54,64 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicPath = path.join(__dirname, 'public');
 
-// Use environment variable for admin hash (FIX 8)
 const ADMIN_HASH = process.env.ADMIN_PASSWORD_HASH || '$2b$10$XhgvQHaYVqyPn6FsP3UGOewx7mP6Qg1f/w06xUpk/PA.4RzRHNUSO';
 
-// Build base URL from environment or fallback to a hardcoded value
+// ✅ FIXED BASE_URL
 const BASE_URL = process.env.BASE_URL || 'https://hts-project-qr.vercel.app';
 
 app.use(express.static(publicPath));
 
-// --- File write mutex (FIX 3) ---
-const locks = new Map();
-
-async function safeSave(fileName, data) {
+// ------------------------------------------------------------------
+//  HELPER: read static JSON files (read‑only, for companies.json only)
+// ------------------------------------------------------------------
+async function loadStatic(fileName, defaultValue = {}) {
   const filePath = path.join(__dirname, fileName);
-  // Simple mutex: wait until no other operation on the same file
-  while (locks.has(filePath)) {
-    await locks.get(filePath);
-  }
-  let resolveLock;
-  const lockPromise = new Promise(res => resolveLock = res);
-  locks.set(filePath, lockPromise);
-
   try {
-    const jsonString = JSON.stringify(data, null, 2);
-    await fs.writeFile(filePath, jsonString, 'utf-8');
-    return true;
+    const data = await fs.readFile(filePath, 'utf-8');
+    return JSON.parse(data);
   } catch (error) {
-    console.error(`Error saving to ${fileName}:`, error);
+    if (error.code === 'ENOENT') return defaultValue;
     throw error;
-  } finally {
-    locks.delete(filePath);
-    resolveLock();
   }
 }
 
-// --- Helpers ---
+async function loadCompanies() {
+  return loadStatic('companies.json', {});
+}
+
+// ------------------------------------------------------------------
+//  USER DATABASE HELPERS (Vercel Postgres)
+// ------------------------------------------------------------------
+async function loadUsers() {
+  const result = await sql`SELECT * FROM users;`;
+  const users = {};
+  result.rows.forEach(row => {
+    users[row.userid] = {
+      first: row.first_name,
+      last: row.last_name || '',
+      company: row.my_company || '',
+      companies: Array.isArray(row.companies) ? row.companies : []
+    };
+  });
+  return users;
+}
+
+async function saveUser(userId, data) {
+  const { first, last, company, companies } = data;
+  await sql`
+    INSERT INTO users (userid, first_name, last_name, my_company, companies)
+    VALUES (${userId}, ${first}, ${last || ''}, ${company || ''}, ${JSON.stringify(companies)})
+    ON CONFLICT (userid) DO UPDATE SET
+      first_name = EXCLUDED.first_name,
+      last_name = EXCLUDED.last_name,
+      my_company = EXCLUDED.my_company,
+      companies = EXCLUDED.companies
+  `;
+}
+
+// ------------------------------------------------------------------
+//  OTHER HELPERS
+// ------------------------------------------------------------------
 function cfl(string) {
   return string.charAt(0).toUpperCase() + string.slice(1);
 }
@@ -108,33 +131,23 @@ function sanitizeExcelText(text) {
   return text;
 }
 
-async function load(fileName, defaultValue = {}) {
-  const filePath = path.join(__dirname, fileName);
-  try {
-    const data = await fs.readFile(filePath, 'utf-8');
-    return JSON.parse(data);
-  } catch (error) {
-    if (error.code === 'ENOENT') return defaultValue;
-    throw error;
-  }
-}
-
-// Use safeSave instead of the old save function
-// (We'll call safeSave everywhere)
-
-// --- Middleware: require admin ---
+// ------------------------------------------------------------------
+//  ADMIN MIDDLEWARE
+// ------------------------------------------------------------------
 const requireAdmin = (req, res, next) => {
   if (req.session && req.session.isAdmin) return next();
   return res.redirect('/login');
 };
 
-// --- Routes ---
+// ------------------------------------------------------------------
+//  ROUTES
+// ------------------------------------------------------------------
 
 app.get("/", (req, res) => {
   res.sendStatus(403);
 });
 
-// --- Login page (GET) ---
+// --- Login page ---
 app.get('/login', (req, res) => {
   if (req.session.isAdmin) return res.redirect('/dashboard');
   const csrfToken = generateToken(req);
@@ -189,34 +202,29 @@ app.get('/login', (req, res) => {
   `);
 });
 
-// --- Download ZIP (now admin only – FIX 10) ---
+// --- Download ZIP ---
 app.get('/download-zip', requireAdmin, async (req, res) => {
-    try {
-        const data = await load('companies.json', {});
-        const companies = Object.keys(data);
-
-        if (companies.length === 0) {
-            return res.status(400).send("No companies found to generate QR codes for.");
-        }
-
-        const archive = new ZipArchive('zip', { zlib: { level: 3 } });
-        
-        res.attachment('all-company-qrs.zip');
-        archive.pipe(res);
-
-        for (const company of companies) {
-            const urlToEncode = `${BASE_URL}/contact?link=${encodeURIComponent(company)}`;
-            const qrBuffer = await QRCode.toBuffer(urlToEncode, { type: 'png', width: 300 });
-            archive.append(qrBuffer, { name: `${cfl(company)}-qr.png` });
-        }
-
-        await archive.finalize();
-    } catch (err) {
-        console.error("ZIP Generation Error:", err);
-        if (!res.headersSent) {
-            res.status(500).send('Error generating QR code batch zip.');
-        }
+  try {
+    const data = await loadCompanies();
+    const companies = Object.keys(data);
+    if (companies.length === 0) {
+      return res.status(400).send("No companies found to generate QR codes for.");
     }
+    const archive = new (await import('archiver')).default('zip', { zlib: { level: 3 } });
+    res.attachment('all-company-qrs.zip');
+    archive.pipe(res);
+    for (const company of companies) {
+      const urlToEncode = `${BASE_URL}/contact?link=${encodeURIComponent(company)}`;
+      const qrBuffer = await QRCode.toBuffer(urlToEncode, { type: 'png', width: 300 });
+      archive.append(qrBuffer, { name: `${cfl(company)}-qr.png` });
+    }
+    await archive.finalize();
+  } catch (err) {
+    console.error("ZIP Generation Error:", err);
+    if (!res.headersSent) {
+      res.status(500).send('Error generating QR code batch zip.');
+    }
+  }
 });
 
 // --- Dashboard ---
@@ -288,11 +296,11 @@ app.get('/dashboard', requireAdmin, async (req, res) => {
   `);
 });
 
-// --- Excel export (FIX 11: rename column) ---
+// --- Excel export (uses Postgres) ---
 app.get('/export', requireAdmin, async (req, res) => {
   try {
-    const users = await load("users.json");
-    const companiesData = await load("companies.json");
+    const users = await loadUsers();               // from DB
+    const companiesData = await loadCompanies();   // static file
     const allCompanyNames = Object.keys(companiesData);
 
     const workbook = new ExcelJS.Workbook();
@@ -314,7 +322,7 @@ app.get('/export', requireAdmin, async (req, res) => {
     const baseColumns = [
       { header: 'First Name', key: 'first', width: 18 },
       { header: 'Last Name', key: 'last', width: 18 },
-      { header: 'Visitors Company', key: 'company', width: 22 },   // FIX 11: renamed
+      { header: 'Visitors Company', key: 'company', width: 22 },
       { header: 'Registered Companies', key: 'companies', width: 35 },
       { header: 'Total Engagement Count', key: 'count', width: 24 }
     ];
@@ -346,7 +354,7 @@ app.get('/export', requireAdmin, async (req, res) => {
       const rowData = {
         first: userProfile.first || '',
         last: userProfile.last || '',
-        company: userProfile.company || '',          // "Visitors Company"
+        company: userProfile.company || '',
         companies: companyList,
         count: totalCount
       };
@@ -380,18 +388,9 @@ app.get('/export', requireAdmin, async (req, res) => {
 
 // --- Contact page ---
 app.get("/contact", async (req, res) => {
-  const testPath = path.join(__dirname, 'companies.json');
-  console.error('TEST PATH:', testPath);
-  try {
-    await fs.access(testPath);
-    console.error('FILE EXISTS');
-  } catch (e) {
-    console.error('FILE NOT FOUND:', e.message);
-  }
   const company = req.query.link;
-  const data = await load("companies.json");
-
-  if(!data[company]) return res.status(400);
+  const data = await loadCompanies();   // now using DB helper? no, static file
+  if (!data[company]) return res.sendStatus(400);
 
   const safeCompany = escapeHtml(company);
   const logoUrl = data[company];
@@ -422,15 +421,17 @@ app.get("/contact", async (req, res) => {
     </html>
   `;
 
+  // If user already has a session
   if (req.session.userId) {
-    const users = await load("users.json");
+    const users = await loadUsers();   // from DB
     const user = users[req.session.userId];
     if (user && user.companies) {
       if (user.companies.includes(company)) {
         return res.send(successHTML);
       }
       user.companies.push(company);
-      await safeSave("users.json", users);       // FIX 3: safeSave
+      // update DB
+      await saveUser(req.session.userId, user);
       req.session.companies = user.companies;
       return res.send(successHTML);
     } else {
@@ -556,7 +557,7 @@ app.post('/login', csrfSynchronisedProtection, async (req, res) => {
 
 app.post('/register', strictRegisterLimiter, csrfSynchronisedProtection, async (req, res) => {
   try {
-    const { first, last, myCompany, company, lang } = req.body;
+    const { first, last, myCompany, company } = req.body;
     if (req.session.userId) {
       return res.status(400).json({ success: false, error: "Session already exists." });
     }
@@ -565,19 +566,16 @@ app.post('/register', strictRegisterLimiter, csrfSynchronisedProtection, async (
     }
 
     const userId = crypto.randomUUID();
-    const users = await load("users.json");
-
-    users[userId] = {
-      first: first,
-      last: last || "",
-      company: myCompany,
+    await saveUser(userId, {
+      first,
+      last: last || '',
+      company: myCompany || '',
       companies: company ? [company] : []
-    };
+    });
 
     req.session.userId = userId;
     req.session.companies = company ? [company] : [];
 
-    await safeSave("users.json", users);              // FIX 3: safeSave
     return res.status(200).json({ success: true, message: "User registered." });
   } catch (err) {
     console.error(err);
@@ -585,7 +583,7 @@ app.post('/register', strictRegisterLimiter, csrfSynchronisedProtection, async (
   }
 });
 
-// --- Error handler for CSRF & other uncaught errors ---
+// --- Error handler for CSRF & others ---
 app.use((err, req, res, next) => {
   if (err.message === 'invalid csrf token') {
     return res.status(403).json({ success: false, error: 'Invalid or missing CSRF token. Please refresh the page.' });
