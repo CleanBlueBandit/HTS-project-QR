@@ -10,7 +10,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { csrfSync } from 'csrf-sync';
 import rateLimit from 'express-rate-limit';
-import { sql } from '@vercel/postgres';  // ✅ Vercel Postgres client
+import { sql } from '@vercel/postgres';  // Vercel Postgres client
 
 const app = express();
 
@@ -80,10 +80,12 @@ async function loadCompanies() {
 }
 
 // ------------------------------------------------------------------
-//  USER DATABASE HELPERS (Vercel Postgres)
+//  USER DATABASE HELPERS (Vercel Postgres with USERS_ prefix)
 // ------------------------------------------------------------------
+const TABLE_NAME = 'USERS_users';  // ✅ Your prefixed table name
+
 async function loadUsers() {
-  const result = await sql`SELECT * FROM users;`;
+  const result = await sql`SELECT * FROM ${sql(TABLE_NAME)};`;
   const users = {};
   result.rows.forEach(row => {
     users[row.userid] = {
@@ -99,7 +101,7 @@ async function loadUsers() {
 async function saveUser(userId, data) {
   const { first, last, company, companies } = data;
   await sql`
-    INSERT INTO users (userid, first_name, last_name, my_company, companies)
+    INSERT INTO ${sql(TABLE_NAME)} (userid, first_name, last_name, my_company, companies)
     VALUES (${userId}, ${first}, ${last || ''}, ${company || ''}, ${JSON.stringify(companies)})
     ON CONFLICT (userid) DO UPDATE SET
       first_name = EXCLUDED.first_name,
@@ -389,7 +391,7 @@ app.get('/export', requireAdmin, async (req, res) => {
 // --- Contact page ---
 app.get("/contact", async (req, res) => {
   const company = req.query.link;
-  const data = await loadCompanies();   // now using DB helper? no, static file
+  const data = await loadCompanies();
   if (!data[company]) return res.sendStatus(400);
 
   const safeCompany = escapeHtml(company);
@@ -423,7 +425,7 @@ app.get("/contact", async (req, res) => {
 
   // If user already has a session
   if (req.session.userId) {
-    const users = await loadUsers();   // from DB
+    const users = await loadUsers();
     const user = users[req.session.userId];
     if (user && user.companies) {
       if (user.companies.includes(company)) {
