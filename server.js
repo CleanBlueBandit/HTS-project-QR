@@ -25,7 +25,7 @@ const { csrfSynchronisedProtection, generateToken } = csrfSync({
 // --- Middleware ---
 app.use(express.json());
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'fallback-dev-secret',
+  secret: process.env.SESSION_SECRET
   resave: false,
   saveUninitialized: true,
   cookie: {
@@ -54,7 +54,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicPath = path.join(__dirname, 'public');
 
-const ADMIN_HASH = process.env.ADMIN_PASSWORD_HASH || '$2b$10$XhgvQHaYVqyPn6FsP3UGOewx7mP6Qg1f/w06xUpk/PA.4RzRHNUSO';
+const ADMIN_HASH = process.env.ADMIN_PASSWORD_HASH;
 
 // ✅ FIXED BASE_URL
 const BASE_URL = process.env.BASE_URL || 'https://hts-project-qr.vercel.app';
