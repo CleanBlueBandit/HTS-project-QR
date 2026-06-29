@@ -380,10 +380,17 @@ app.get('/export', requireAdmin, async (req, res) => {
 
 // --- Contact page ---
 app.get("/contact", async (req, res) => {
+  const testPath = path.join(__dirname, 'companies.json');
+  console.error('TEST PATH:', testPath);
+  try {
+    await fs.access(testPath);
+    console.error('FILE EXISTS');
+  } catch (e) {
+    console.error('FILE NOT FOUND:', e.message);
+  }
   const company = req.query.link;
   const data = await load("companies.json");
-  console.log('Companies data:', data);
-  console.log('Requested company:', company);
+
   if(!data[company]) return res.status(400);
 
   const safeCompany = escapeHtml(company);
