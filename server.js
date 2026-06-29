@@ -384,6 +384,7 @@ app.get("/contact", async (req, res) => {
   const data = await load("companies.json");
   console.log('Companies data:', data);
   console.log('Requested company:', company);
+  if(!data[company]) return res.status(400);
 
   const safeCompany = escapeHtml(company);
   const logoUrl = data[company];
