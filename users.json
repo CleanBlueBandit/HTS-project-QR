@@ -1,18 +1,30 @@
 {
-  "George": {
-    "lastname": "Tavadze",
-    "companies": [
-      "Google",
-      "google",
-      "apple",
-      "cloudflare"
-    ]
-  },
   "John": {
     "lastname": "Doe",
+    "company": "HTS",
     "companies": [
-      "Apple",
-      "apple"
+      "google",
+      "paloalto",
+      "microsoft"
+    ]
+  },
+  "Jane": {
+    "lastname": "Doe",
+    "company": "Mari's Sacxobi, LTD.",
+    "companies": [
+      "microsoft",
+      "google",
+      "paloalto",
+      "fortinet"
+    ]
+  },
+  "Arthur": {
+    "lastname": "Morgan",
+    "company": "Wildwest, Corp.",
+    "companies": [
+      "fortinet",
+      "thales",
+      "akamai"
     ]
   }
 }

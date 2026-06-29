@@ -7,8 +7,7 @@ import fs from 'fs/promises';
 import ExcelJS from 'exceljs';
 import bcrypt from 'bcryptjs';
 import { ZipArchive } from 'archiver';
-
-
+import accepts from 'accepts';
 
 // Middleware
 const app = express();
@@ -18,13 +17,11 @@ app.use(session({
   resave: false,                   
   saveUninitialized: true,         
   cookie: {          
-    secure: false,                 
+    secure: false, // EDIT THIS WHEN ON HTTPS SERVER               
     httpOnly: true                 
   }
 }));
-const archive = new ZipArchive({ 
-    zlib: { level: 3 } 
-});
+
 const requireAdmin = (req, res, next) => {
     if (req.session && req.session.isAdmin || unlocked) {
         return next();
@@ -35,13 +32,15 @@ const requireAdmin = (req, res, next) => {
 // Constants
 const IP = "10.0.0.110";
 const PORT = 6767;
+const PROTOCOL = "http";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const publicPath = path.join(__dirname, 'public');
 const ADMIN_HASH = "$2b$10$XhgvQHaYVqyPn6FsP3UGOewx7mP6Qg1f/w06xUpk/PA.4RzRHNUSO";
+const unlocked = true; // LOCK THIS WHEN ACTUALLY DEPLOYING THE SERVER
+const supportedLanguages = ['en', 'ge'];
 
-// Global variables
-
-var unlocked = true;
+app.use(express.static(publicPath));
 
 // Helpers
 
@@ -79,13 +78,15 @@ async function save(fileName, data) {
 }
 
 // Get
+
+
 app.get("/", (req, res) => {
     res.sendStatus(403);
 })
 
 app.get('/login', (req, res) => {
     if (req.session.isAdmin) return res.redirect('/dashboard');
-
+    
     res.send(`
         <!DOCTYPE html>
         <html>
@@ -113,7 +114,7 @@ app.get('/login', (req, res) => {
                 function login() {
                     const pass = document.getElementById("password").value;
                     
-                    fetch("http://${IP}:${PORT}/login", {
+                    fetch("${PROTOCOL}://${IP}:${PORT}/login", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ password: pass })
@@ -152,7 +153,7 @@ app.get('/download-zip', async (req, res) => {
         archive.pipe(res);
 
         for (const company of companies) {
-            const urlToEncode = `http://${IP}:${PORT}/contact?link=${encodeURIComponent(company)}`;
+            const urlToEncode = `${PROTOCOL}://${IP}:${PORT}/contact?link=${encodeURIComponent(company)}`;
             
             const qrBuffer = await QRCode.toBuffer(urlToEncode, { type: 'png', width: 300 });
 
@@ -170,7 +171,7 @@ app.get('/download-zip', async (req, res) => {
 });
 
 app.get('/dashboard', requireAdmin, async (req, res) => {
-    const defaultUrl = `http://${IP}:${PORT}/`;
+    const defaultUrl = `${PROTOCOL}://${IP}:${PORT}/`;
     const defaultQrCode = await QRCode.toDataURL(defaultUrl);
 
     res.send(`
@@ -178,7 +179,7 @@ app.get('/dashboard', requireAdmin, async (req, res) => {
         <html>
         <head>
             <title>Admin Dashboard</title>
-            <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+            <script src="${PROTOCOL}s://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
             <style>
                 body { 
                     font-family: sans-serif; 
@@ -227,7 +228,7 @@ app.get('/dashboard', requireAdmin, async (req, res) => {
                 .btn-generate { background: #28a745; color: white; border: none; padding: 0 15px; border-radius: 4px; font-weight: bold; cursor: pointer; }
                 .btn-generate:hover { background: #218838; }
                 a:visited {
-                    color: blue;
+                    color: #1f4e78;
                 }
             </style>
         </head>
@@ -256,7 +257,6 @@ app.get('/dashboard', requireAdmin, async (req, res) => {
 
             <script>
                 function generateNewQR() {
-                    // 1. Notice we are checking for lowercase 'qrcode' now!
                     if (typeof qrcode === 'undefined') {
                         return alert("The QR generator library is missing or hasn't loaded yet.");
                     }
@@ -264,25 +264,15 @@ app.get('/dashboard', requireAdmin, async (req, res) => {
                     const urlInput = document.getElementById("url").value.trim();
                     if (!urlInput) return alert("Please enter a company link identifier!");
 
-                    const targetUrl = "http://${IP}:${PORT}/contact?link=" + encodeURIComponent(urlInput);
+                    const targetUrl = "${PROTOCOL}://${IP}:${PORT}/contact?link=" + encodeURIComponent(urlInput);
 
                     try {
-                        // 2. Initialize the QR code (0 = auto-size, 'L' = Low error correction)
                         const qr = qrcode(0, 'L');
-                        
-                        // 3. Feed it the URL data
                         qr.addData(targetUrl);
-                        
-                        // 4. Process the code matrix
                         qr.make();
-                        
-                        // 5. Export as a Base64 image URL (the numbers 6 and 2 are cell size and margin)
-                        const imgDataUrl = qr.createDataURL(6, 2); 
-                        
-                        // 6. Update the dashboard image and download link instantly
+                        const imgDataUrl = qr.createDataURL(6, 2);
                         document.getElementById("qr").src = imgDataUrl;
                         document.getElementById("dl-link").href = imgDataUrl;
-                        
                     } catch (err) {
                         console.error(err);
                         alert("Error generating QR code locally. Check the console.");
@@ -297,6 +287,9 @@ app.get('/dashboard', requireAdmin, async (req, res) => {
 app.get('/export', requireAdmin, async (req, res) => {
     try {
         const users = await load("users.json");
+        const companiesData = await load("companies.json");
+        
+        const allCompanyNames = Object.keys(companiesData);
 
         const workbook = new ExcelJS.Workbook();
         const worksheet = workbook.addWorksheet('User Interests');
@@ -313,12 +306,21 @@ app.get('/export', requireAdmin, async (req, res) => {
             right: { style: 'thin', color: { argb: 'D9D9D9' } }
         };
 
-        worksheet.columns = [
+        const baseColumns = [
             { header: 'First Name', key: 'first', width: 18 },
             { header: 'Last Name', key: 'last', width: 18 },
+            { header: 'Company', key: 'company', width: 18 },
             { header: 'Registered Companies', key: 'companies', width: 35 },
             { header: 'Total Engagement Count', key: 'count', width: 24 }
         ];
+
+        const dynamicCompanyColumns = allCompanyNames.map(company => ({
+            header: company,
+            key: `comp_${company}`,
+            width: 15
+        }));
+
+        worksheet.columns = [...baseColumns, ...dynamicCompanyColumns];
 
         const headerRow = worksheet.getRow(1);
         headerRow.height = 26;
@@ -332,16 +334,23 @@ app.get('/export', requireAdmin, async (req, res) => {
         let rowIndex = 2;
         for (const firstName in users) {
             const userProfile = users[firstName];
-            const companyList = Array.isArray(userProfile.companies) ? userProfile.companies.join(', ') : '';
-            const totalCount = Array.isArray(userProfile.companies) ? userProfile.companies.length : 0;
+            const userCompanies = Array.isArray(userProfile.companies) ? userProfile.companies : [];
+            const companyList = userCompanies.join(', ');
+            const totalCount = userCompanies.length;
 
-            const row = worksheet.addRow({
+            const rowData = {
                 first: firstName,
                 last: userProfile.lastname || '',
+                company: userProfile.company || '',
                 companies: companyList,
                 count: totalCount
+            };
+
+            allCompanyNames.forEach(company => {
+                rowData[`comp_${company}`] = userCompanies.includes(company);
             });
 
+            const row = worksheet.addRow(rowData);
             row.height = 20;
 
             row.eachCell((cell, colNumber) => {
@@ -354,6 +363,8 @@ app.get('/export', requireAdmin, async (req, res) => {
 
                 if (colNumber === 4) {
                     cell.alignment = { horizontal: 'right', vertical: 'middle' };
+                } else if (colNumber > 5) {
+                    cell.alignment = { horizontal: 'center', vertical: 'middle' };
                 } else {
                     cell.alignment = { horizontal: 'left', vertical: 'middle' };
                 }
@@ -457,6 +468,10 @@ app.get("/contact", async (req, res) => {
                         <input type="text" placeholder="Last Name" id="lastname" required>
                         <p id="last-req" class="error-msg"></p>
                     </div>
+                    <div class="input-wrapper">
+                        <input type="text" placeholder="Your company" id="company" required>
+                        <p id="comp-req" class="error-msg"></p>
+                    </div>
                     <button onclick="post()">Submit Details</button>
                 </div>
             </div>
@@ -465,8 +480,10 @@ app.get("/contact", async (req, res) => {
                 function post() {
                     const first = document.getElementById("name").value;
                     const last = document.getElementById("lastname").value;
+                    const myCompany = document.getElementById("company").value;
+
                     
-                    if(first == "" || last == ""){
+                    if(first == "" || last == "" || myCompany == ""){
                         if(first == ""){
                             document.getElementById("name-req").innerText = "This field is required";
                         } else {
@@ -477,11 +494,16 @@ app.get("/contact", async (req, res) => {
                         } else {
                             document.getElementById("last-req").innerText = "";
                         }
+                        if(myCompany == ""){
+                            document.getElementById("comp-req").innerText = "This field is required";
+                        } else {
+                            document.getElementById("comp-req").innerText = "";
+                        }
                         return;
                     }
-                    const company = document.title;
+                    const company = "${company}";
                     
-                    fetch("http://${IP}:${PORT}/register", {
+                    fetch("${PROTOCOL}://${IP}:${PORT}/register", {
                         method: "POST",
                         headers: {
                             "Content-Type": "application/json"
@@ -489,6 +511,7 @@ app.get("/contact", async (req, res) => {
                         body: JSON.stringify({
                             first: first,
                             last: last,
+                            myCompany: myCompany,
                             company: company
                         })
                     })
@@ -537,7 +560,7 @@ app.post('/login', async (req, res) => {
 
 app.post('/register', async (req, res) => {
     try {
-        const { first, last, company } = req.body;
+        const { first, last, myCompany, company, lang } = req.body;
         const session = req.session;
 
         if (session.name) {
@@ -558,10 +581,13 @@ app.post('/register', async (req, res) => {
 
         session.name = first;
         session.lastname = last;
+        session.company = myCompany;
+        session.lang = lang;
         session.companies = company ? [company] : [];
 
         users[first] = {
             lastname: last || "",
+            company: myCompany,
             companies: company ? [company] : []
         };
 
@@ -581,5 +607,5 @@ app.post('/register', async (req, res) => {
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`Server running on http://${IP}:${PORT}`);
+  console.log(`Server running on ${PROTOCOL}://${IP}:${PORT}`);
 });
