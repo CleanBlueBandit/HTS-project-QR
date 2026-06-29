@@ -21,7 +21,8 @@
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
     "express-session": "^1.19.0",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "sql": "^0.78.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
