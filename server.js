@@ -10,7 +10,9 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { csrfSync } from 'csrf-sync';
 import rateLimit from 'express-rate-limit';
-import { sql } from '@vercel/postgres';
+import postgres from 'postgres';
+import JSZip from 'jszip';
+
 
 const app = express();
 
@@ -22,17 +24,85 @@ const { csrfSynchronisedProtection, generateToken } = csrfSync({
   getTokenFromRequest: (req) => req.body._csrf || req.headers['x-csrf-token'],
 });
 
+// --- Constants ---
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const publicPath = path.join(__dirname, 'public');
+
+const ADMIN_HASH = process.env.ADMIN_PASSWORD_HASH;
+const sql = postgres(process.env.DATABASE_URL, { ssl: 'require' });
+
+// ✅ FIXED BASE_URL
+const BASE_URL = process.env.BASE_URL || 'https://hts-project-qr.vercel.app';
+
+// ------------------------------------------------------------------
+//  POSTGRES-BACKED SESSION STORE
+//  (MemoryStore doesn't survive across serverless invocations on
+//  Vercel, since each one can run in a separate process/instance.)
+// ------------------------------------------------------------------
+class PgSessionStore extends session.Store {
+  constructor(sqlClient) {
+    super();
+    this.sql = sqlClient;
+  }
+
+  async get(sid, cb) {
+    try {
+      const rows = await this.sql`
+        SELECT sess FROM "session" WHERE sid = ${sid} AND expire >= now()
+      `;
+      cb(null, rows.length ? rows[0].sess : null);
+    } catch (err) {
+      cb(err);
+    }
+  }
+
+  async set(sid, sessionData, cb) {
+    try {
+      const expire = new Date(Date.now() + (sessionData.cookie?.maxAge || 86400000));
+      await this.sql`
+        INSERT INTO "session" (sid, sess, expire)
+        VALUES (${sid}, ${this.sql.json(sessionData)}, ${expire})
+        ON CONFLICT (sid) DO UPDATE SET sess = EXCLUDED.sess, expire = EXCLUDED.expire
+      `;
+      cb(null);
+    } catch (err) {
+      cb(err);
+    }
+  }
+
+  async destroy(sid, cb) {
+    try {
+      await this.sql`DELETE FROM "session" WHERE sid = ${sid}`;
+      cb(null);
+    } catch (err) {
+      cb(err);
+    }
+  }
+
+  async touch(sid, sessionData, cb) {
+    try {
+      const expire = new Date(Date.now() + (sessionData.cookie?.maxAge || 86400000));
+      await this.sql`UPDATE "session" SET expire = ${expire} WHERE sid = ${sid}`;
+      cb(null);
+    } catch (err) {
+      cb(err);
+    }
+  }
+}
+
 // --- Middleware ---
 app.use(express.json());
 app.use(session({
+  store: new PgSessionStore(sql),
   secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: true,
   cookie: {
     secure: true,
     httpOnly: true,
-    sameSite: 'lax',
-    maxAge: 1000 * 60 * 60 * 24
+    sameSite: 'lax',                  // was 'strict' — QR scans are top-level cross-site navigations
+    maxAge: 1000 * 60 * 60 * 24 * 7    // 7 days — adjust to your event length
   }
 }));
 
@@ -49,16 +119,6 @@ const strictRegisterLimiter = rateLimit({
   max: 10,
   message: { success: false, error: 'Too many registration attempts, please try again later.' }
 });
-
-// --- Constants ---
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const publicPath = path.join(__dirname, 'public');
-
-const ADMIN_HASH = process.env.ADMIN_PASSWORD_HASH;
-
-// ✅ FIXED BASE_URL
-const BASE_URL = process.env.BASE_URL || 'https://hts-project-qr.vercel.app';
 
 app.use(express.static(publicPath));
 
@@ -81,19 +141,27 @@ async function loadCompanies() {
 }
 
 // ------------------------------------------------------------------
-//  USER DATABASE HELPERS (Vercel Postgres with USERS_ prefix)
+//  USER DATABASE HELPERS
 // ------------------------------------------------------------------
 const TABLE_NAME = 'USERS_users';  // ✅ Your prefixed table name
 
 async function loadUsers() {
-  const result = await sql`SELECT * FROM ${sql(TABLE_NAME)};`;
+  const rows = await sql`SELECT * FROM ${sql(TABLE_NAME)};`;
   const users = {};
-  result.rows.forEach(row => {
+  rows.forEach(row => {
+    let companiesArr = row.companies;
+    if (typeof companiesArr === 'string') {
+      try {
+        companiesArr = JSON.parse(companiesArr);
+      } catch {
+        companiesArr = [];
+      }
+    }
     users[row.userid] = {
       first: row.first_name,
       last: row.last_name || '',
       company: row.my_company || '',
-      companies: Array.isArray(row.companies) ? row.companies : []
+      companies: Array.isArray(companiesArr) ? companiesArr : []
     };
   });
   return users;
@@ -110,25 +178,6 @@ async function saveUser(userId, data) {
       my_company = EXCLUDED.my_company,
       companies = EXCLUDED.companies
   `;
-}
-
-async function findUserByIdentity(first, last, company) {
-  const result = await sql`
-    SELECT * FROM ${sql(TABLE_NAME)}
-    WHERE LOWER(TRIM(first_name)) = LOWER(TRIM(${first}))
-      AND LOWER(TRIM(COALESCE(last_name, ''))) = LOWER(TRIM(${last || ''}))
-      AND LOWER(TRIM(COALESCE(my_company, ''))) = LOWER(TRIM(${company || ''}))
-    LIMIT 1;
-  `;
-  if (result.rows.length === 0) return null;
-  const row = result.rows[0];
-  return {
-    userId: row.userid,
-    first: row.first_name,
-    last: row.last_name || '',
-    company: row.my_company || '',
-    companies: Array.isArray(row.companies) ? row.companies : []
-  };
 }
 
 // ------------------------------------------------------------------
@@ -232,15 +281,23 @@ app.get('/download-zip', requireAdmin, async (req, res) => {
     if (companies.length === 0) {
       return res.status(400).send("No companies found to generate QR codes for.");
     }
-    const archive = new (await import('archiver')).default('zip', { zlib: { level: 3 } });
-    res.attachment('all-company-qrs.zip');
-    archive.pipe(res);
+
+    const zip = new JSZip();
     for (const company of companies) {
       const urlToEncode = `${BASE_URL}/contact?link=${encodeURIComponent(company)}`;
       const qrBuffer = await QRCode.toBuffer(urlToEncode, { type: 'png', width: 300 });
-      archive.append(qrBuffer, { name: `${cfl(company)}-qr.png` });
+      zip.file(`${cfl(company)}-qr.png`, qrBuffer);
     }
-    await archive.finalize();
+
+    const zipBuffer = await zip.generateAsync({
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 }
+    });
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename=all-company-qrs.zip');
+    res.send(zipBuffer);
   } catch (err) {
     console.error("ZIP Generation Error:", err);
     if (!res.headersSent) {
@@ -317,46 +374,6 @@ app.get('/dashboard', requireAdmin, async (req, res) => {
     </html>
   `);
 });
-
-app.get('/admin/dedupe', requireAdmin, async (req, res) => {
-  try {
-    const { rows } = await sql`SELECT * FROM ${sql(TABLE_NAME)};`;
-    const groups = new Map();
-    for (const row of rows) {
-      const key = [
-        (row.first_name || '').trim().toLowerCase(),
-        (row.last_name || '').trim().toLowerCase(),
-        (row.my_company || '').trim().toLowerCase()
-      ].join('|');
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(row);
-    }
-
-    let removed = 0;
-    for (const dupes of groups.values()) {
-      if (dupes.length < 2) continue;
-      const keeper = dupes[0];
-      const companies = new Set(Array.isArray(keeper.companies) ? keeper.companies : []);
-      for (const d of dupes.slice(1)) {
-        (Array.isArray(d.companies) ? d.companies : []).forEach(c => companies.add(c));
-      }
-      await saveUser(keeper.userid, {
-        first: keeper.first_name,
-        last: keeper.last_name || '',
-        company: keeper.my_company || '',
-        companies: [...companies]
-      });
-      const ids = dupes.slice(1).map(d => d.userid);
-      await sql`DELETE FROM ${sql(TABLE_NAME)} WHERE userid = ANY(${ids});`;
-      removed += ids.length;
-    }
-    res.json({ success: true, duplicatesRemoved: removed });
-  } catch (err) {
-    console.error('Dedupe error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
 
 // --- Excel export (uses Postgres) ---
 app.get('/export', requireAdmin, async (req, res) => {
@@ -488,19 +505,23 @@ app.get("/contact", async (req, res) => {
     const users = await loadUsers();
     const user = users[req.session.userId];
     if (user && user.companies) {
-      if (user.companies.includes(company)) {
+        if (user.companies.includes(company)) {
         return res.send(successHTML);
-      }
-      user.companies.push(company);
-      // update DB
-      await saveUser(req.session.userId, user);
-      req.session.companies = user.companies;
-      return res.send(successHTML);
-    } else {
-      req.session.destroy(() => {});
-      return res.redirect(`/contact?link=${encodeURIComponent(company)}`);
+        }
+        user.companies.push(company);
+        try {
+        await saveUser(req.session.userId, user);
+        } catch (err) {
+        console.error('Failed to save company visit:', err);
+        }
+        req.session.companies = user.companies;
+        return res.send(successHTML);
+        }
+        else {
+            req.session.destroy(() => {});
+            return res.redirect(`/contact?link=${encodeURIComponent(company)}`);
+        }
     }
-  }
 
   // No session – show registration form
   const csrfToken = generateToken(req);
@@ -619,7 +640,7 @@ app.post('/login', csrfSynchronisedProtection, async (req, res) => {
 
 app.post('/register', strictRegisterLimiter, csrfSynchronisedProtection, async (req, res) => {
   try {
-    let { first, last, myCompany, company } = req.body;
+    const { first, last, myCompany, company } = req.body;
     if (req.session.userId) {
       return res.status(400).json({ success: false, error: "Session already exists." });
     }
@@ -627,46 +648,23 @@ app.post('/register', strictRegisterLimiter, csrfSynchronisedProtection, async (
       return res.status(400).json({ success: false, error: "First name is required." });
     }
 
-    // Normalize so re-entries match cleanly
-    first = first.trim();
-    last = (last || '').trim();
-    myCompany = (myCompany || '').trim();
-
-    // Has this exact visitor registered before? (iOS lost-cookie case)
-    const existing = await findUserByIdentity(first, last, myCompany);
-
-    if (existing) {
-      const companies = Array.isArray(existing.companies) ? existing.companies : [];
-      if (company && !companies.includes(company)) {
-        companies.push(company);   // add the new booth interest, no duplicate company
-      }
-      await saveUser(existing.userId, {
-        first: existing.first,
-        last: existing.last,
-        company: existing.company,
-        companies
-      });
-      req.session.userId = existing.userId;   // re-bind session to the original record
-      req.session.companies = companies;
-      return res.status(200).json({ success: true, merged: true });
-    }
-
-    // Genuinely new visitor
     const userId = crypto.randomUUID();
-    const companies = company ? [company] : [];
-    await saveUser(userId, { first, last, company: myCompany, companies });
+    await saveUser(userId, {
+      first,
+      last: last || '',
+      company: myCompany || '',
+      companies: company ? [company] : []
+    });
 
     req.session.userId = userId;
-    req.session.companies = companies;
-    return res.status(200).json({ success: true, merged: false });
+    req.session.companies = company ? [company] : [];
+
+    return res.status(200).json({ success: true, message: "User registered." });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ success: false, error: "Internal Server Error" });
   }
 });
-
-
-
 
 // --- Error handler for CSRF & others ---
 app.use((err, req, res, next) => {
