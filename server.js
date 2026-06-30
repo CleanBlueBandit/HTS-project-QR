@@ -10,7 +10,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { csrfSync } from 'csrf-sync';
 import rateLimit from 'express-rate-limit';
-import { sql } from '@vercel/postgres';  // Vercel Postgres client
+import { sql } from '@vercel/postgres';
 
 const app = express();
 
@@ -29,7 +29,7 @@ app.use(session({
   resave: false,
   saveUninitialized: true,
   cookie: {
-    secure: true,          // HTTPS only
+    secure: true,
     httpOnly: true,
     sameSite: 'strict'
   }
