@@ -9,7 +9,7 @@ import ExcelJS from 'exceljs';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { csrfSync } from 'csrf-sync';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import postgres from 'postgres';
 import JSZip from 'jszip';
 
@@ -87,13 +87,7 @@ class PgSessionStore extends session.Store {
 }
 
 // Postgres-backed rate limit store (same rationale as PgSessionStore).
-// Requires this table to exist:
-//   CREATE TABLE IF NOT EXISTS "rate_limit_hits" (
-//     key    TEXT        NOT NULL,
-//     hit_at TIMESTAMPTZ NOT NULL DEFAULT now()
-//   );
-//   CREATE INDEX IF NOT EXISTS idx_rate_limit_hits_key_hit_at
-//     ON "rate_limit_hits" (key, hit_at);
+
 class PgRateLimitStore {
   constructor(sqlClient) {
     this.sql = sqlClient;
@@ -150,10 +144,10 @@ app.use(session({
 // separate store + prefixed key per limiter so they don't share counts
 const globalLimiter = rateLimit({
   windowMs: 15 * 1000, // 15 seconds 
-  max: 250,
+  max: 25,
   store: new PgRateLimitStore(sql),
   keyGenerator: (req) => {
-    const id = (req.session && req.session.userId) ? req.session.userId : req.ip;
+    const id = (req.session && req.session.userId) ? req.session.userId : ipKeyGenerator(req.ip);
     return `global:${id}`;
   },
   message: { success: false, error: 'We are sorry, but somebody is trying to crash the server on this network, so we choose to defend it.' }
@@ -161,9 +155,9 @@ const globalLimiter = rateLimit({
 
 const strictRegisterLimiter = rateLimit({
   windowMs: 15 * 1000, // 15 seconds
-  max: 5,
+  max: 10,
   store: new PgRateLimitStore(sql),
-  keyGenerator: (req) => `register:${req.ip}`,
+  keyGenerator: (req) => `register:${ipKeyGenerator(req.ip)}`,
   message: { success: false, error: 'We are sorry, but somebody is trying to crash the server on this network, so we choose to defend it.' }
 });
 
