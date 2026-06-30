@@ -99,10 +99,10 @@ app.use(session({
   resave: false,
   saveUninitialized: true,
   cookie: {
-    secure: true,
+    secure: true,                      // requires HTTPS (Vercel is fine)
     httpOnly: true,
-    sameSite: 'lax',                  // was 'strict' — QR scans are top-level cross-site navigations
-    maxAge: 1000 * 60 * 60 * 24 * 7    // 7 days — adjust to your event length
+    sameSite: 'none',                  // ✅ iOS Safari attaches the cookie on the cross-app QR jump
+    maxAge: 1000 * 60 * 60 * 24 * 7    // 7 days — persistent cookie, survives Safari backgrounding
   }
 }));
 
@@ -114,16 +114,19 @@ const globalLimiter = rateLimit({
 });
 app.use(globalLimiter);
 
+// NOTE: at a 1000+ person event, many phones share one NAT'd Wi-Fi IP.
+// A low per-IP cap would wrongly block legitimate registrations, so this is
+// set generously. Lower it if you ever run this somewhere without shared Wi-Fi.
 const strictRegisterLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10,
+  max: 100,
   message: { success: false, error: 'Too many registration attempts, please try again later.' }
 });
 
 app.use(express.static(publicPath));
 
 // ------------------------------------------------------------------
-//  HELPER: read static JSON files (read‑only, for companies.json only)
+//  HELPER: read static JSON files (read-only, for companies.json only)
 // ------------------------------------------------------------------
 async function loadStatic(fileName, defaultValue = {}) {
   const filePath = path.join(__dirname, fileName);
@@ -167,6 +170,23 @@ async function loadUsers() {
   return users;
 }
 
+// Load a single user by id (cheaper than loading the whole table)
+async function loadUser(userId) {
+  const rows = await sql`SELECT * FROM ${sql(TABLE_NAME)} WHERE userid = ${userId} LIMIT 1;`;
+  if (!rows.length) return null;
+  const row = rows[0];
+  let companiesArr = row.companies;
+  if (typeof companiesArr === 'string') {
+    try { companiesArr = JSON.parse(companiesArr); } catch { companiesArr = []; }
+  }
+  return {
+    first: row.first_name,
+    last: row.last_name || '',
+    company: row.my_company || '',
+    companies: Array.isArray(companiesArr) ? companiesArr : []
+  };
+}
+
 async function saveUser(userId, data) {
   const { first, last, company, companies } = data;
   await sql`
@@ -178,6 +198,39 @@ async function saveUser(userId, data) {
       my_company = EXCLUDED.my_company,
       companies = EXCLUDED.companies
   `;
+}
+
+// ------------------------------------------------------------------
+//  RELINK TOKEN (cookie-independent identity, for iOS Safari)
+//  We hand the browser a signed token after registration. It lives in
+//  localStorage. On any later scan, if the cookie was dropped, the page
+//  POSTs this token to /relink to re-establish the session. The HMAC
+//  signature means a stolen UUID alone can't be used to impersonate.
+// ------------------------------------------------------------------
+function signUserId(userId) {
+  const mac = crypto
+    .createHmac('sha256', process.env.SESSION_SECRET)
+    .update(userId)
+    .digest('hex');
+  return `${userId}.${mac}`;
+}
+
+function verifyRelinkToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  const idx = token.lastIndexOf('.');
+  if (idx === -1) return null;
+  const userId = token.slice(0, idx);
+  const sig = token.slice(idx + 1);
+  if (!userId || !sig) return null;
+  const expected = crypto
+    .createHmac('sha256', process.env.SESSION_SECRET)
+    .update(userId)
+    .digest('hex');
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return null;
+  if (!crypto.timingSafeEqual(a, b)) return null;
+  return userId;
 }
 
 // ------------------------------------------------------------------
@@ -247,8 +300,9 @@ app.get('/login', (req, res) => {
       <script>
         function login() {
           const pass = document.getElementById("password").value;
-          fetch("${BASE_URL}/login", {
+          fetch("/login", {
             method: "POST",
+            credentials: "same-origin",
             headers: {
               "Content-Type": "application/json",
               "X-CSRF-Token": "${csrfToken}"
@@ -500,31 +554,34 @@ app.get("/contact", async (req, res) => {
     </html>
   `;
 
-  // If user already has a session
+  // If user already has a valid session, record the visit and show success.
   if (req.session.userId) {
-    const users = await loadUsers();
-    const user = users[req.session.userId];
-    if (user && user.companies) {
-        if (user.companies.includes(company)) {
+    const user = await loadUser(req.session.userId);
+    if (user) {
+      if (user.companies.includes(company)) {
         return res.send(successHTML);
-        }
-        user.companies.push(company);
-        try {
+      }
+      user.companies.push(company);
+      try {
         await saveUser(req.session.userId, user);
-        } catch (err) {
+      } catch (err) {
         console.error('Failed to save company visit:', err);
-        }
-        req.session.companies = user.companies;
-        return res.send(successHTML);
-        }
-        else {
-            req.session.destroy(() => {});
-            return res.redirect(`/contact?link=${encodeURIComponent(company)}`);
-        }
+      }
+      req.session.companies = user.companies;
+      return res.send(successHTML);
+    } else {
+      // session points at a user that no longer exists — clear and retry
+      req.session.destroy(() => {});
+      return res.redirect(`/contact?link=${encodeURIComponent(company)}`);
     }
+  }
 
-  // No session – show registration form
+  // No session — show registration form, BUT first try a cookie-independent
+  // relink using a token previously stored in localStorage (iOS Safari path).
   const csrfToken = generateToken(req);
+  const companyJson = JSON.stringify(company);
+  const csrfJson = JSON.stringify(csrfToken);
+
   res.send(`
     <!DOCTYPE html>
     <html lang="en">
@@ -545,10 +602,11 @@ app.get("/contact", async (req, res) => {
         .error-msg { color: #dc2626; font-size: 13px; margin: 0; min-height: 16px; padding-left: 4px; }
         button { padding: 16px; background-color: #111827; color: #ffffff; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; transition: background-color 0.2s; margin-top: 8px; width: 100%; box-sizing: border-box; }
         button:active { background-color: #374151; }
+        #relink-status { color: #6b7280; font-size: 14px; padding: 24px 0; }
       </style>
     </head>
     <body>
-      <div class="card">
+      <div class="card" id="reg-card">
         <img src="${logoUrl}" alt="${safeCompany} logo">
         <h1>Thanks for your interest!</h1>
         <h2>Just tell us your name so we can reach out later.</h2>
@@ -568,37 +626,78 @@ app.get("/contact", async (req, res) => {
           <button onclick="post()">Submit Details</button>
         </div>
       </div>
+
       <script>
+        var RELINK_KEY = "hts_qr_relink";
+        var COMPANY = ${companyJson};
+        var CSRF = ${csrfJson};
+
+        // --- Cookie-independent relink (runs on load) -------------------
+        // If this visitor registered before, their signed token is in
+        // localStorage even if Safari wiped the session cookie. Use it to
+        // restore the session so the form never reappears.
+        (function tryRelink() {
+          var token = null;
+          try { token = localStorage.getItem(RELINK_KEY); } catch (e) {}
+          if (!token) return;  // first-time visitor → show the form normally
+
+          var card = document.getElementById("reg-card");
+          if (card) card.style.display = "none";  // hide form while relinking
+
+          fetch("/relink", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json", "X-CSRF-Token": CSRF },
+            body: JSON.stringify({ token: token, company: COMPANY })
+          })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (d && d.success) {
+              window.location.reload();   // now has a session → success page
+            } else {
+              try { localStorage.removeItem(RELINK_KEY); } catch (e) {}
+              if (card) card.style.display = "";   // token invalid → show form
+            }
+          })
+          .catch(function () {
+            if (card) card.style.display = "";
+          });
+        })();
+
+        // --- Registration ----------------------------------------------
         function post() {
           const first = document.getElementById("name").value;
           const last = document.getElementById("lastname").value;
           const myCompany = document.getElementById("company").value;
-          if(first == "" || last == "" || myCompany == ""){
-            if(first == "") document.getElementById("name-req").innerText = "This field is required";
-            else document.getElementById("name-req").innerText = "";
-            if(last == "") document.getElementById("last-req").innerText = "This field is required";
-            else document.getElementById("last-req").innerText = "";
-            if(myCompany == "") document.getElementById("comp-req").innerText = "This field is required";
-            else document.getElementById("comp-req").innerText = "";
+          if (first == "" || last == "" || myCompany == "") {
+            document.getElementById("name-req").innerText = (first == "") ? "This field is required" : "";
+            document.getElementById("last-req").innerText = (last == "") ? "This field is required" : "";
+            document.getElementById("comp-req").innerText = (myCompany == "") ? "This field is required" : "";
             return;
           }
-          const company = "${company}";
-          fetch("${BASE_URL}/register", {
+          fetch("/register", {
             method: "POST",
+            credentials: "same-origin",
             headers: {
               "Content-Type": "application/json",
-              "X-CSRF-Token": "${csrfToken}"
+              "X-CSRF-Token": CSRF
             },
             body: JSON.stringify({
               first: first,
               last: last,
               myCompany: myCompany,
-              company: company
+              company: COMPANY
             })
           })
           .then(res => res.json())
           .then((data) => {
-            if(data.success) window.location.href = "/contact?link=${company}";
+            if (data.success) {
+              // Save the cookie-independent token for future scans
+              if (data.relinkToken) {
+                try { localStorage.setItem(RELINK_KEY, data.relinkToken); } catch (e) {}
+              }
+              window.location.href = "/contact?link=" + encodeURIComponent(COMPANY);
+            }
           })
           .catch(err => console.error(err));
         }
@@ -659,9 +758,49 @@ app.post('/register', strictRegisterLimiter, csrfSynchronisedProtection, async (
     req.session.userId = userId;
     req.session.companies = company ? [company] : [];
 
-    return res.status(200).json({ success: true, message: "User registered." });
+    return res.status(200).json({
+      success: true,
+      message: "User registered.",
+      relinkToken: signUserId(userId)   // ✅ cookie-independent fallback token
+    });
   } catch (err) {
     console.error(err);
+    return res.status(500).json({ success: false, error: "Internal Server Error" });
+  }
+});
+
+// --- Relink: re-establish a session from a localStorage token ---
+// Used when iOS Safari dropped the session cookie. The token is HMAC-signed
+// so a bare UUID can't be forged into a valid identity.
+app.post('/relink', csrfSynchronisedProtection, async (req, res) => {
+  try {
+    const { token, company } = req.body;
+    const userId = verifyRelinkToken(token);
+    if (!userId) {
+      return res.status(401).json({ success: false, error: "Invalid token." });
+    }
+
+    const user = await loadUser(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, error: "User not found." });
+    }
+
+    // Re-establish the session
+    req.session.userId = userId;
+
+    // Record the company visit (only if it's a real company and not a dup)
+    if (company) {
+      const companies = await loadCompanies();
+      if (companies[company] && !user.companies.includes(company)) {
+        user.companies.push(company);
+        await saveUser(userId, user);
+      }
+    }
+    req.session.companies = user.companies;
+
+    return res.status(200).json({ success: true });
+  } catch (err) {
+    console.error('Relink error:', err);
     return res.status(500).json({ success: false, error: "Internal Server Error" });
   }
 });
