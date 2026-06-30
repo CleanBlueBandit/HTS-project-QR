@@ -31,7 +31,8 @@ app.use(session({
   cookie: {
     secure: true,
     httpOnly: true,
-    sameSite: 'strict'
+    sameSite: 'lax',
+    maxAge: 1000 * 60 * 60 * 24
   }
 }));
 
@@ -109,6 +110,25 @@ async function saveUser(userId, data) {
       my_company = EXCLUDED.my_company,
       companies = EXCLUDED.companies
   `;
+}
+
+async function findUserByIdentity(first, last, company) {
+  const result = await sql`
+    SELECT * FROM ${sql(TABLE_NAME)}
+    WHERE LOWER(TRIM(first_name)) = LOWER(TRIM(${first}))
+      AND LOWER(TRIM(COALESCE(last_name, ''))) = LOWER(TRIM(${last || ''}))
+      AND LOWER(TRIM(COALESCE(my_company, ''))) = LOWER(TRIM(${company || ''}))
+    LIMIT 1;
+  `;
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+  return {
+    userId: row.userid,
+    first: row.first_name,
+    last: row.last_name || '',
+    company: row.my_company || '',
+    companies: Array.isArray(row.companies) ? row.companies : []
+  };
 }
 
 // ------------------------------------------------------------------
@@ -297,6 +317,46 @@ app.get('/dashboard', requireAdmin, async (req, res) => {
     </html>
   `);
 });
+
+app.get('/admin/dedupe', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await sql`SELECT * FROM ${sql(TABLE_NAME)};`;
+    const groups = new Map();
+    for (const row of rows) {
+      const key = [
+        (row.first_name || '').trim().toLowerCase(),
+        (row.last_name || '').trim().toLowerCase(),
+        (row.my_company || '').trim().toLowerCase()
+      ].join('|');
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    }
+
+    let removed = 0;
+    for (const dupes of groups.values()) {
+      if (dupes.length < 2) continue;
+      const keeper = dupes[0];
+      const companies = new Set(Array.isArray(keeper.companies) ? keeper.companies : []);
+      for (const d of dupes.slice(1)) {
+        (Array.isArray(d.companies) ? d.companies : []).forEach(c => companies.add(c));
+      }
+      await saveUser(keeper.userid, {
+        first: keeper.first_name,
+        last: keeper.last_name || '',
+        company: keeper.my_company || '',
+        companies: [...companies]
+      });
+      const ids = dupes.slice(1).map(d => d.userid);
+      await sql`DELETE FROM ${sql(TABLE_NAME)} WHERE userid = ANY(${ids});`;
+      removed += ids.length;
+    }
+    res.json({ success: true, duplicatesRemoved: removed });
+  } catch (err) {
+    console.error('Dedupe error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 
 // --- Excel export (uses Postgres) ---
 app.get('/export', requireAdmin, async (req, res) => {
@@ -559,7 +619,7 @@ app.post('/login', csrfSynchronisedProtection, async (req, res) => {
 
 app.post('/register', strictRegisterLimiter, csrfSynchronisedProtection, async (req, res) => {
   try {
-    const { first, last, myCompany, company } = req.body;
+    let { first, last, myCompany, company } = req.body;
     if (req.session.userId) {
       return res.status(400).json({ success: false, error: "Session already exists." });
     }
@@ -567,23 +627,46 @@ app.post('/register', strictRegisterLimiter, csrfSynchronisedProtection, async (
       return res.status(400).json({ success: false, error: "First name is required." });
     }
 
+    // Normalize so re-entries match cleanly
+    first = first.trim();
+    last = (last || '').trim();
+    myCompany = (myCompany || '').trim();
+
+    // Has this exact visitor registered before? (iOS lost-cookie case)
+    const existing = await findUserByIdentity(first, last, myCompany);
+
+    if (existing) {
+      const companies = Array.isArray(existing.companies) ? existing.companies : [];
+      if (company && !companies.includes(company)) {
+        companies.push(company);   // add the new booth interest, no duplicate company
+      }
+      await saveUser(existing.userId, {
+        first: existing.first,
+        last: existing.last,
+        company: existing.company,
+        companies
+      });
+      req.session.userId = existing.userId;   // re-bind session to the original record
+      req.session.companies = companies;
+      return res.status(200).json({ success: true, merged: true });
+    }
+
+    // Genuinely new visitor
     const userId = crypto.randomUUID();
-    await saveUser(userId, {
-      first,
-      last: last || '',
-      company: myCompany || '',
-      companies: company ? [company] : []
-    });
+    const companies = company ? [company] : [];
+    await saveUser(userId, { first, last, company: myCompany, companies });
 
     req.session.userId = userId;
-    req.session.companies = company ? [company] : [];
-
-    return res.status(200).json({ success: true, message: "User registered." });
+    req.session.companies = companies;
+    return res.status(200).json({ success: true, merged: false });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ success: false, error: "Internal Server Error" });
   }
 });
+
+
+
 
 // --- Error handler for CSRF & others ---
 app.use((err, req, res, next) => {
