@@ -12,6 +12,7 @@ import { csrfSync } from 'csrf-sync';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import postgres from 'postgres';
 import JSZip from 'jszip';
+import { inject } from '@vercel/analytics';
 
 
 const app = express();
@@ -306,6 +307,22 @@ function toScriptSafeJson(value) {
     .replace(/&/g, '\\u0026');
 }
 
+// Injects Vercel Web Analytics script into HTML before closing </body> tag
+function injectAnalytics(html) {
+  const analyticsScript = `<script>
+window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
+</script>
+<script defer src="/_vercel/insights/script.js"></script>`;
+  
+  // Find the closing body tag and insert the analytics script before it
+  const bodyCloseIndex = html.lastIndexOf('</body>');
+  if (bodyCloseIndex !== -1) {
+    return html.slice(0, bodyCloseIndex) + analyticsScript + html.slice(bodyCloseIndex);
+  }
+  // If no </body> tag found, return HTML as-is
+  return html;
+}
+
 // ------------------------------------------------------------------
 //  ADMIN MIDDLEWARE
 // ------------------------------------------------------------------
@@ -326,7 +343,7 @@ app.get("/", (req, res) => {
 app.get('/login', (req, res) => {
   if (req.session.isAdmin) return res.redirect('/dashboard');
   const csrfToken = generateToken(req);
-  res.send(`
+  res.send(injectAnalytics(`
     <!DOCTYPE html>
     <html>
     <head>
@@ -376,7 +393,7 @@ app.get('/login', (req, res) => {
       </script>
     </body>
     </html>
-  `);
+  `));
 });
 
 // --- Download ZIP ---
@@ -417,7 +434,7 @@ app.get('/dashboard', requireAdmin, async (req, res) => {
   try {
     const defaultUrl = `${BASE_URL}/`;
     const defaultQrCode = await QRCode.toDataURL(defaultUrl);
-    res.send(`
+    res.send(injectAnalytics(`
     <!DOCTYPE html>
     <html>
     <head>
@@ -479,7 +496,7 @@ app.get('/dashboard', requireAdmin, async (req, res) => {
       </script>
     </body>
     </html>
-  `);
+  `));
   } catch (err) {
     console.error("Failed to render dashboard:", err);
     if (!res.headersSent) {
@@ -591,7 +608,7 @@ app.get("/contact", async (req, res) => {
     const safeCompany = escapeHtml(company);
     const logoUrl = data[company];
 
-    const successHTML = `
+    const successHTML = injectAnalytics(`
       <!DOCTYPE html>
       <html lang="en">
       <head>
@@ -615,7 +632,7 @@ app.get("/contact", async (req, res) => {
         </div>
       </body>
       </html>
-    `;
+    `);
 
     // If user already has a valid session, record the visit and show success.
     if (req.session.userId) {
@@ -645,7 +662,7 @@ app.get("/contact", async (req, res) => {
     const companyJson = toScriptSafeJson(company);
     const csrfJson = toScriptSafeJson(csrfToken);
 
-    res.send(`
+    res.send(injectAnalytics(`
       <!DOCTYPE html>
       <html lang="en">
       <head>
@@ -765,7 +782,7 @@ app.get("/contact", async (req, res) => {
         </script>
       </body>
       </html>
-    `);
+    `));
   } catch (err) {
     console.error('Error in /contact:', err);
     if (!res.headersSent) {
