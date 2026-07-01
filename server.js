@@ -683,7 +683,7 @@ app.get("/contact", async (req, res) => {
               <p id="last-req" class="error-msg"></p>
             </div>
             <div class="input-wrapper">
-              <input type="text" placeholder="Your company" id="company" required>
+              <input type="text" placeholder="Your Company Name" id="company" required>
               <p id="comp-req" class="error-msg"></p>
             </div>
             <button onclick="post()">Submit Details</button>
