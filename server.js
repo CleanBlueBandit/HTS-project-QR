@@ -12,7 +12,6 @@ import { csrfSync } from 'csrf-sync';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import postgres from 'postgres';
 import JSZip from 'jszip';
-import { Analytics } from '@vercel/analytics/next';
 
 
 const app = express();
