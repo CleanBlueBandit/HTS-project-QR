@@ -14,5 +14,6 @@
   "calico": "/calico.jpeg",
   "aws": "/aws.jpeg",
   "creatio": "/creatio.jpeg",
-  "google": "/google.jpeg"
+  "google": "/google.jpeg",
+  "cloudflare": "/cloudflare.jpeg"
 }
