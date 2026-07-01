@@ -144,7 +144,7 @@ app.use(session({
 // separate store + prefixed key per limiter so they don't share counts
 const globalLimiter = rateLimit({
   windowMs: 15 * 1000, // 15 seconds 
-  max: 50,
+  max: 300,
   store: new PgRateLimitStore(sql),
   keyGenerator: (req) => {
     const id = (req.session && req.session.userId) ? req.session.userId : ipKeyGenerator(req.ip);
@@ -155,7 +155,7 @@ const globalLimiter = rateLimit({
 
 const strictRegisterLimiter = rateLimit({
   windowMs: 15 * 1000, // 15 seconds
-  max: 40,
+  max: 250,
   store: new PgRateLimitStore(sql),
   keyGenerator: (req) => `register:${ipKeyGenerator(req.ip)}`,
   message: { success: false, error: 'We are sorry, but somebody is trying to crash the server on this network, so we choose to defend it.' }
